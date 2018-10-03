@@ -9,6 +9,14 @@ mutable struct EthHdr
     EthHdr() = new("","",0)
 end # struct EthHdr
 
+mutable struct VLAN
+	priority::UInt8
+	dei::UInt8
+	id::Int16
+	ptype::UInt16
+	VLAN() = new(0,0,0,0)
+end # strut 802.1Q Virtual LAN
+
 mutable struct IpFlags
     reserved::Bool
     dont_frag::Bool
@@ -81,9 +89,10 @@ end # struct IcmpHdr
 
 mutable struct DecPkt
     datalink::EthHdr
+	vlan::Any
     network::IpHdr
     protocol::Any
-    DecPkt() = new(EthHdr(), IpHdr(), nothing)
+    DecPkt() = new(EthHdr(), VLAN(), IpHdr(), nothing)
 end # struct DecPkt
 
 @inline function getindex_he(::Type{T}, b::Vector{UInt8}, i) where {T}
@@ -105,6 +114,20 @@ function decode_eth_hdr(d::Array{UInt8})
     eh.ptype    = getindex_be(UInt16, d, 13)
     eh
 end # function decode_eth_hdr
+
+#----------
+# decode 802.1q VLAN
+#----------
+function decode_vlan(d::Array{UInt8})
+	vlan = VLAN()
+    vlan_temp::UInt16 = (0 + d[1]) << 8 + d[2] # converts first 2 bytes of UInt8 array to UInt16
+	vlan.priority = (vlan_temp & 0xe000) >> 13
+	vlan.dei = (vlan_temp & 0x1000) >> 12
+	vlan.id = (vlan_temp & 0x0fff)
+	vlan.ptype = getindex_be(UInt16, d, 3)
+#	vlan.payload = d[4:end]
+	vlan
+end
 
 #----------
 # calculate IP checksum
@@ -218,17 +241,31 @@ end # function decode_icmp_hdr
 function decode_pkt(pkt::Array{UInt8})
     decoded           = DecPkt()
     decoded.datalink  = decode_eth_hdr(pkt)
-    iphdr             = decode_ip_hdr(pkt[15:end])
-    decoded.network   = iphdr
-
-    proto = nothing
-    if (iphdr.protocol == 1)
-        proto = decode_icmp_hdr(pkt[15 + iphdr.length:end])
-    elseif (iphdr.protocol == 6)
-        proto = decode_tcp_hdr(pkt[15 + iphdr.length:end])
-    elseif (iphdr.protocol == 17)
-        proto = decode_udp_hdr(pkt[15 + iphdr.length:end])
-    end
+        
+	vlans = []
+	byte_loc = 13
+	temp_vlan_check = getindex_be(UInt16, pkt, byte_loc)
+	while temp_vlan_check in Set([0x8100, 0x88a8, 0x9100])
+		vlan = decode_vlan(pkt[byte_loc + 2:byte_loc + 5])
+		push!(vlans, vlan)
+		byte_loc += 4
+		temp_vlan_check = getindex_be(UInt16, pkt, byte_loc)
+	end
+	
+	decoded.vlan = vlans
+	proto = nothing
+	
+    if temp_vlan_check == 0x0800
+		iphdr = decode_ip_hdr(pkt[byte_loc + 2:byte_loc + 21])
+		decoded.network = iphdr
+		if (iphdr.protocol == 1)
+        	proto = decode_icmp_hdr(pkt[byte_loc + 2 + iphdr.length:end])
+    	elseif (iphdr.protocol == 6)
+        	proto = decode_tcp_hdr(pkt[byte_loc + 2 + iphdr.length:end])
+    	elseif (iphdr.protocol == 17)
+        	proto = decode_udp_hdr(pkt[byte_loc + 2 + iphdr.length:end])
+		end
+	end
 
     decoded.protocol = proto
     decoded
